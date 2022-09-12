@@ -14,6 +14,7 @@ bel$Mainland.Distance <- as.factor(bel$Mainland.Distance)
 bel$Sea.Depth <- as.factor(bel$Sea.Depth)
 bel[bel == 0.00] <- NA
 
+#if reading in data from formatted supplementary data file, INST = "Museum", Number = "MuseumCat.", Source = "Island" (General Locality, Collection Date, TV, HF, E, and Type.information are original variables in raw data file that were not used in analyses)
 bel <- subset(bel, select = c(Museum, MuseumCat., Genus, species, 
                               Subspecies, CPL, CIL, UTL, MTL, EPL, PPL, 
                               EB, MB, LB, LIB, ZB, BB, LPL, CNL, PBPL, 
@@ -199,7 +200,7 @@ IM_mice25<-agglomerate.data(data=bel25, imp=imp_bel25, Mimp=100, Method="mice")
 #IM_mice25$ImpM   # average dataset
 #IM_mice25$Mi #list with the m imputed datasets
 
-write.csv(IM_mice25$ImpM, file="imputed belangeri with 2 LACM.csv")
+write.csv(IM_mice25$ImpM, file="imputed belangeri.csv")
 #imp <- read.csv("imputed belangeri.csv")
 
 
