@@ -1,0 +1,1064 @@
+---
+title: "Ecogeographical rules in *T. belangeri*"
+author: "Maya Juman"
+date: "August 1, 2022"
+output: html_document
+---
+
+```{r, include = FALSE}
+library(MASS)
+library(shapes)
+library(psych)
+library(lme4)
+library(nlme)
+library(lmerTest)
+library(leaps)
+library(RColorBrewer)
+library(viridis)
+library(car)
+library(ggplot2)
+library(ggfortify)
+library(hier.part)
+library(Morpho)
+library(ellipse)
+library(ggfortify)
+library(plyr)
+library(interactions)
+library(performance)
+library(see)
+library(patchwork)
+library(raster)
+library(grid)
+library(lattice)
+library(latticeExtra)
+library(ncdf4)
+library(cowplot)
+library(rgbif)
+library(sf)
+library(corrplot)
+```
+
+```{r, include = FALSE}
+#set up data
+setwd("~/Desktop/belangeri")
+bel <- read.csv("belangeri.csv")
+
+#dealing with NAs outside of measurements
+bel$Island.Area[is.na(bel$Island.Area)] <- ""
+bel$Mainland.Distance[is.na(bel$Mainland.Distance)] <- ""
+bel$Sea.Depth[is.na(bel$Sea.Depth)] <- ""
+bel$Island.Area <- as.factor(bel$Island.Area)
+bel$Mainland.Distance <- as.factor(bel$Mainland.Distance)
+bel$Sea.Depth <- as.factor(bel$Sea.Depth)
+bel[bel == 0.00] <- NA
+
+bel <- subset(bel, select = c(Museum, MuseumCat., Genus, species, Subspecies, CPL, CIL, UTL, MTL, EPL, PPL, EB, MB, LB, LIB, ZB, BB, LPL, CNL, PBPL, LTPL, LCH, MH, MCH, MCW, MCIL, LTL, Sex, Lat, Long, Locality, General.Locality, Island, Island.Area, Mainland.Distance, Sea.Depth, Collection.Year, Collection.Date, TL, TV, HF, E, WT, Type.information, elev))
+
+#table(beltax$Island) #111 island, 726 mainland individuals
+#(colMeans(is.na(beltax[,6:27])))*100 #missing data
+#mean((is.na(beltax[,6:27])))*100
+#sum(is.na(beltax[,6:27]))/prod(dim(beltax[,6:27]))
+
+#beltax25 <- beltax[,6:27][,colMeans(is.na(beltax[,6:27]))<0.25]
+#sum(is.na(beltax25))/prod(dim(beltax25)) #15% missing data now; better
+
+bel$Sex[bel$Sex == "sex unknown"] <- NA #clean up sex variable
+bel$Sex <- droplevels(bel$Sex)
+summary(bel$Sex)    #363 F, 440 M, 37 unknown
+
+bel <- bel[-which(bel$MuseumCat. == 35822),] #blank
+bel <- bel[-which(bel$MuseumCat. == 1990512),] #blank
+
+beltax <- bel #save unimputed dataset for taxonomic analysis
+
+#potentially problematic individuals, based on imputation plots (see below for code):
+bel[817,] #no obvious issues
+bel[199,] #specimen is on the larger side
+bel[709,] #specimen is on the larger side but measurements are almost complete
+bel <- bel[-which(bel$MuseumCat. == "6.11.6.3"),] #no obviously weird measurements, but missing MANY
+
+#drop 2 specimens without locality
+bel <- bel[-which(bel$MuseumCat. == "62.7.16.12"),]
+bel <- bel[-which(bel$MuseumCat. == 87167),]
+bel$Island <- droplevels(bel$Island)
+
+#dump empty rows
+
+#finding elevation
+belsites <- subset(bel, select = c(Lat, Long))
+names(belsites) <- c("decimalLatitude","decimalLongitude")
+elevations<- elevation(belsites,username = "mjuman")
+length(which(elevations$elevation_geonames == -32768)) #0 missing
+
+#check to see if generated elevation aligns with the elevations we have on file
+comparisons <- (which(!is.na(bel$elev)))
+comparison <- data.frame(bel$elev[comparisons])
+comparison$new <- elevations[comparisons,]$elevation_geonames
+#mean(abs(comparison$bel.elev.comparisons.-comparison$new)) #166 m error on avg
+
+#read in elevation for sites that are missing it
+for (i in 1:836) {
+  if (is.na(bel$elev[i])) {
+    bel$elev[i] <- elevations$elevation_geonames[i]
+  }
+}
+
+#summary(bel$elev) #check
+```
+
+```{r, include=FALSE}
+imp <- read.csv("imputed belangeri with 2 LACM.csv")
+imp <- imp[,-1]
+
+pca <- princomp(log(imp), cor=TRUE)
+for (i in 1:18) {
+  pca$loadings[,i] <- (pca$loadings[,i] * pca$sdev[i])
+}
+print(summary(pca),digits=4,loadings=pca$loadings,cutoff=0)
+round(rev(sort(pca$loadings[,1])),digits=4) #check to make sure PC1 represents size: 75.4% variance explained, high loadings on all variables, yes
+pca$sdev^2 #eigenvalues (i.e. squared standard dv)
+
+bel$pc1 <- pca[["scores"]][,1]
+bel$pc2 <- pca[["scores"]][,2]
+
+#confirm correlations on PC1
+cor.test(bel$pc1, bel$TL) #PC1 positively correlated w/ body length
+cor.test(bel$pc1, bel$WT) #PC1 positively correlated w/ body weight
+cor.test(bel$pc1, bel$CPL) #PC1 strongly positively correlated w/ CPL, skull length
+
+bel2 <- bel[,-c(6:27)]
+bel2 <- cbind(bel2, log(imp))
+bel2$Island <- relevel(bel2$Island, ref = "mainland") 
+#summary(lm(pc1 ~ Island*Sex, data=bel2)) check to make sure relevel worked
+
+islands <- bel2[which(bel2$Island == "island"),]
+```
+
+```{r, include = FALSE}
+#extracting climate data from Climatic Research Unit (CRU) at the University of East Anglia;  time-series global land climate data on a 0.5° x 0.5° degree grid; 1901-2020
+
+beltemp <- bel2[!is.na(bel2$Collection.Year),]
+beltemp <- beltemp[-which(beltemp$Collection.Year < 1901),]
+
+#set up data
+#setwd("~/Desktop/belangeri/CRU climate")
+#nc.tmp <- nc_open("cru_ts4.05.1901.2020.tmp.dat.nc")
+#print(nc.tmp)
+
+#tmp <- brick("~/Desktop/belangeri/CRU climate/cru_ts4.05.1901.2020.tmp.dat.nc", varname="tmp")
+#tmprast <- raster("~/Desktop/belangeri/CRU climate/cru_ts4.05.1901.2020.tmp.dat.nc", varname="tmp")
+
+#sites <- data.frame(beltemp$Long, beltemp$Lat)
+#tmp.sites <- data.frame(extract(tmp, sites, ncol=2))
+
+years <- 1901:2020
+#yearly avg
+#tmp.year.total <- as.data.frame(sapply(years, function(x) rowMeans(tmp.sites[, grep(x, names(tmp.sites))])))
+#names(tmp.year.total) <- years # Rename columns in the new data frame object
+
+#write.csv(tmp.year.total, file="Temp Data final.csv", row.names=FALSE)
+
+temp <- read.csv("Temp Data final.csv")
+names(temp) <- years
+
+beltemp <- beltemp[-which(is.na(temp[,1])),]
+temp <- temp[-which(is.na(temp[,1])),]
+
+mean(c(mean(temp[,1]),mean(temp[,2]),mean(temp[,3]),mean(temp[,4]),mean(temp[,5]))) #mean annual temp across all sites was 24.14 degrees C in 1901-1905
+mean(temp[,120]) #mean annual temp across all sites was 24.99 degrees C in 2020
+
+#temp for each year in each locality
+beltemp$temp <- NA
+for (i in 1:749) {
+  beltemp$temp[i] <- temp[i,as.character(beltemp[i,15])]
+}
+
+#precipitation
+
+#setwd("~/Desktop/belangeri/CRU climate")
+#nc.pre <- nc_open("cru_ts4.05.1901.2020.pre.dat.nc")
+#print(nc.pre)
+
+#pre <- brick("~/Desktop/belangeri/CRU climate/cru_ts4.05.1901.2020.pre.dat.nc", varname="pre")
+#prerast <- raster("~/Desktop/belangeri/CRU climate/cru_ts4.05.1901.2020.pre.dat.nc", varname="pre")
+
+#clim <- stack(tmprast, prerast)
+
+#extract
+#sites <- data.frame(beltemp$Long, beltemp$Lat)
+#pre.sites <- data.frame(extract(pre, sites, ncol=2))
+
+#take yearly
+#pre.year.total <- as.data.frame(sapply(years, function(x) rowSums(pre.sites[, grep(x, names(pre.sites))])))
+#names(pre.year.total) <- years # Rename columns in the new data frame object
+
+#save
+#write.csv(pre.year.total, file="Precipitation Data final.csv", row.names=FALSE)
+
+prec <- read.csv("Precipitation Data final.csv")
+
+names(prec) <- years
+
+#add to df
+beltemp$pre <- NA
+for (i in 1:749) {
+  beltemp$pre[i] <- prec[i,as.character(beltemp[i,15])]
+}
+
+#beltemp$pre
+
+#test plot
+#se_asia_lim <- extent(87, 111, 7, 30)
+#se_asia <- crop(tmp, se_asia_lim)
+#plot(se_asia$X1901.01.16)
+#points(x=bel$Long, y=bel$Lat, pch=20)
+
+bel2_log <- bel2
+bel2_log$Collection.Year <- as.numeric(scale(log(bel2_log$Collection.Year)))
+bel2_log$Lat <- as.numeric(scale(log(bel2_log$Lat)))
+bel2_log$elev <- as.numeric(scale(log(bel2_log$elev)))
+
+beltemp_log <- beltemp
+beltemp_log$Collection.Year <- scale(log(beltemp_log$Collection.Year))
+beltemp_log$temp <- scale(log(beltemp_log$temp))
+beltemp_log$Lat <- scale(log(beltemp_log$Lat))
+beltemp_log$pre <- scale(log(beltemp_log$pre))
+beltemp_log$elev <- scale(log(beltemp_log$elev))
+```
+
+```{r}
+###FOREST DATA WILL HAVE TO BE EXTRACTED FOR ENTIRE DATASET FOR SUPPLEMENTARY DATA
+
+###HYDE MODEL
+#https://www.ncei.noaa.gov/access/metadata/landing-page/bin/iso?id=gov.noaa.ncdc:C00814
+
+sites <- data.frame(beltemp$Long, beltemp$Lat)
+
+setwd("~/Desktop/belangeri/CRU climate")
+lc <- nc_open("landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best.nc")
+print(lc)
+
+SecTmpDBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best.nc", varname = "SecTmpDBF")
+
+SecTmpDBF2 <- data.frame(extract(SecTmpDBF, sites, ncol=2))
+length(which(is.na(SecTmpDBF2)))
+
+SecTmpEBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best.nc", varname = "SecTmpEBF")
+
+SecTmpEBF2 <- data.frame(extract(SecTmpEBF, sites, ncol=2))
+length(which(is.na(SecTmpEBF2)))
+
+SecTmpENF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best.nc", varname = "SecTmpENF")
+
+SecTmpENF2 <- data.frame(extract(SecTmpENF, sites, ncol=2))
+length(which(is.na(SecTmpENF2)))
+
+SecTrpDBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best.nc", varname = "SecTrpDBF")
+
+SecTrpDBF2 <- data.frame(extract(SecTrpDBF, sites, ncol=2))
+length(which(is.na(SecTrpDBF2)))
+
+SecTrpEBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best.nc", varname = "SecTrpEBF")
+
+SecTrpEBF2 <- data.frame(extract(SecTrpEBF, sites, ncol=2))
+length(which(is.na(SecTrpEBF2)))
+
+TmpDBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best.nc", varname = "TmpDBF")
+
+TmpDBF2 <- data.frame(extract(TmpDBF, sites, ncol=2))
+length(which(is.na(TmpDBF2)))
+
+TmpEBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best.nc", varname = "TmpEBF")
+
+TmpEBF2 <- data.frame(extract(TmpEBF, sites, ncol=2))
+length(which(is.na(TmpEBF2)))
+
+TmpENF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best.nc", varname = "TmpENF")
+
+TmpENF2 <- data.frame(extract(TmpENF, sites, ncol=2))
+length(which(is.na(TmpENF2)))
+
+TrpDBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best.nc", varname = "TrpDBF")
+
+TrpDBF2 <- data.frame(extract(TrpDBF, sites, ncol=2))
+length(which(is.na(TrpDBF2)))
+
+TrpEBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best.nc", varname = "TrpEBF")
+
+TrpEBF2 <- data.frame(extract(TrpEBF, sites, ncol=2))
+length(which(is.na(TrpDBF2)))
+
+urb <- brick("~/Desktop/belangeri/CRU climate/urban.nc", varname = "Urban")
+urb2 <- data.frame(extract(urb, sites, ncol=2))
+urb2 <- urb2[,-(1:28)]
+
+length(which(is.na(urb2)))
+
+forests <- SecTmpDBF2 + SecTmpEBF2 + SecTmpENF2 + SecTrpDBF2 + SecTrpEBF2 + TmpDBF2 + TmpEBF2 + TmpENF2 + TrpDBF2 + TrpEBF2
+
+prim <- TmpDBF2 + TmpEBF2 + TmpENF2 + TrpDBF2 + TrpEBF2
+
+years <- 1901:2003
+names(forests) <- years
+names(prim) <- years
+names(urb2) <- years
+
+beltemp2 <- beltemp[which(!is.na(forests[,1])),]
+forests <- na.omit(forests)
+prim <- na.omit(prim)
+urb2 <- na.omit(urb2)
+
+beltemp2$forests <- NA
+for (i in 1:672) {
+  beltemp2$forests[i] <- forests[i,as.character(beltemp2[i,15])]
+}
+
+beltemp2$prim <- NA
+for (i in 1:672) {
+  beltemp2$prim[i] <- prim[i,as.character(beltemp2[i,15])]
+}
+
+beltemp2$urb <- NA
+for (i in 1:672) {
+  beltemp2$urb[i] <- urb2[i,as.character(beltemp2[i,15])]
+}
+
+beltemp_log2 <- beltemp2
+beltemp_log2$Collection.Year <- scale(log(beltemp_log2$Collection.Year))
+beltemp_log2$temp <- scale(log(beltemp_log2$temp))
+beltemp_log2$Lat <- scale(log(beltemp_log2$Lat))
+beltemp_log2$pre <- scale(log(beltemp_log2$pre))
+beltemp_log2$forests <- scale(log(beltemp_log2$forests+1))
+beltemp_log2$prim <- scale(log(beltemp_log2$prim+1))
+beltemp_log2$elev <- scale(log(beltemp_log2$elev))
+beltemp_log2$urb <- scale(log(beltemp_log2$urb+1))
+```
+
+##Bergmann's rule, island rule, and time
+
+```{r}
+t.test(pc1 ~ Sex, bel2)
+#t.test(CPL ~ Sex, bel2)
+#ssd confirmed
+
+levels(bel2_log$Island) <- c("Mainland","Island")
+levels(bel2$Island) <- c("Mainland","Island")
+```
+
+```{r}
+#reminder: SSD seems to be more of a thing on mainlands than on islands; perhaps not significant for islands (also smaller sample)
+
+bp <- na.omit(subset(bel2, select = c(Sex, Island, pc1)))
+levels(bp$Sex) <- c("Female", "Male")
+levels(bp$Island) <- c("Mainland","Island")
+
+boxplot <- ggplot(bp, aes(x=Island, y=pc1, fill=Sex)) + 
+  geom_boxplot() + 
+  scale_fill_manual(values=c("#D41159","#1A85FF")) + 
+  theme_bw() + 
+  ylab("PC1") + 
+  theme(axis.title.x = element_blank(),
+        axis.text.y = element_text(color="black", size=10),
+        axis.title.y = element_text(size=14, color="black"),
+        axis.text.x = element_text(color="black", size=15, vjust=-1),
+        axis.ticks.x = element_blank(),
+        panel.background = element_rect(colour = "black", size=0.5),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.spacing.y = unit(4, "mm"),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.885),
+        legend.key.size = unit(10, 'mm'),
+        legend.margin = unit(0,"cm")) +
+  guides(fill = guide_legend(label.theme = element_text(angle = 0, size=12)))
+
+new2b <- ggplot(bel2, aes(x=Lat, y=pc1)) +
+  geom_point(size=2, aes(shape=Island, color=Island)) + 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank(),
+        legend.position = c(0.88, 0.9),
+        legend.key.size = unit(4, 'mm'),
+        legend.text = element_text(size=12),
+        axis.title = element_text(size=14),
+        axis.text = element_text(size=10, color="black"),
+        legend.key.height=unit(1.3,"line")) +
+  scale_color_brewer(palette="Dark2") +
+  ylab("PC1") + xlab("Latitude (N)") + geom_smooth(method='lm', color="black", se=FALSE, size=0.5)
+
+plot_grid(boxplot, new2b,
+  nrow = 1,
+  labels = "AUTO",
+  label_size = 28,
+  label_x = 0.1,
+  label_y = 0.95,
+  align = "hv",
+  axis = "tblr"
+)
+
+#ggsave("Fig. 2.jpg", width = 12, height = 5)
+#ggsave("Fig. 2.pdf", width = 12, height = 5)
+```
+
+```{r}
+dat = bel2
+
+mod <- (lm(pc1 ~ Collection.Year*Island*Lat, data=bel2, na.action = na.omit))
+
+# three way interaction
+make_pred_dat = function(data=dat, nA=20, nB=3) {
+  nCat = 2
+  d = with(dat, 
+           data.frame(Lat=rep(seq(7.5, 20, length=20), 3*2),
+                      Collection.Year=rep(rep(c(1877,1923,1968), each=20), 2),
+                      Island=rep(unique(Island), each=20*3)))
+  d$pc1 = predict(mod, newdata=d, interval = 'confidence')[,1]
+  d$lwr = predict(mod, newdata=d, interval = 'confidence')[,2]
+  d$upr = predict(mod, newdata=d, interval = 'confidence')[,3]
+
+  return(d)
+}
+
+#plot + format
+ggplot(make_pred_dat(), aes(x=Lat, y=pc1, colour=Island)) + 
+  geom_ribbon(aes(ymin = lwr,
+                  ymax = upr,
+                  fill= Island), 
+              alpha=0.1, color=NA) +
+  geom_line(size=1) +
+  facet_grid(. ~ round(Collection.Year,2)) +
+  labs(colour="") + theme_bw() +
+    theme(panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.position = c(0.91, 0.92),
+          legend.key.size = unit(6, 'mm'),
+          legend.text = element_text(size=10),
+          legend.background = element_rect(fill=NA),
+          legend.spacing.y = unit(0, "cm"),
+          legend.key.height=unit(0.9,"line"),
+          strip.text.x = element_text(size = 12, color = "black"),
+          strip.background = element_rect(color="black", fill="grey90", linetype="solid"
+     )) +
+  scale_color_brewer(palette="Dark2") + ylab("PC1") + xlab("Latitude (N)") +
+  ylim(-12,12) + scale_fill_brewer(palette="Dark2") + guides(fill="none")
+
+#ggsave("FINAL Extended Fig. 3.jpg", width = 7, height = 4)
+#ggsave("FINAL Extended Fig. 3.pdf", width = 7, height = 4)
+
+entirething <- (lm(pc1 ~ Collection.Year*Sex*Island*Lat, data=bel2_log, na.action = na.omit))
+
+reduced <- stepAIC(entirething, direction = "backward", trace = FALSE)
+summary(reduced)
+plot(reduced)
+vif(reduced)
+
+reduced_unscaled <- (lm(pc1 ~ Collection.Year*Island*Lat+Sex*Island, data=bel2, na.action = na.omit))
+
+new4a <- interact_plot(reduced_unscaled, pred=Lat, modx=Collection.Year, modxvals = c(1874,1906,1938,1970,2003), 
+              plot.points = TRUE, colors=rev(c("#990000", "#CC0000", "#FF6600FF", "#FF9900FF", "#FFCC00FF")), 
+              line.thickness=1.5, legend.main="Year", interval=TRUE) + 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_text(size=12),
+        legend.position = c(0.92, 0.82),
+        legend.key.size = unit(8, 'mm'),
+        legend.text = element_text(size=12),
+        axis.title = element_text(size=14),
+        axis.text = element_text(size=10, color="black"),
+        legend.key.height=unit(1.2,"line"),
+        panel.background = element_rect(colour = "black", size=0.5)) +
+  ylab("PC1") + xlab("Latitude (N)")
+
+vif((lm(pc1 ~ Sex + Collection.Year*Lat*Island + Sex*Island, data=bel2_log, na.action = na.omit)))
+vif((lm(pc1 ~ Sex + Collection.Year+Lat+Island, data=bel2_log, na.action = na.omit)))
+
+```
+
+```{r}
+new4b <- ggplot(bel2, aes(x=Collection.Year, y=pc1)) +
+  geom_point(size=2, aes(shape=Island, color=Island)) + 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.spacing.y = unit(0, "cm"),
+        legend.title = element_blank(),
+        legend.position = c(0.88, 0.9),
+        legend.key.size = unit(4, 'mm'),
+        legend.text = element_text(size=12),
+        axis.title = element_text(size=14),
+        axis.text = element_text(size=10, color="black"),
+        legend.key.height=unit(1.3,"line")) +
+  scale_color_brewer(palette="Dark2") +
+  ylab("PC1") + xlab("Collection Year") + geom_smooth(method='lm', color="black", se=FALSE, size=0.5)
+
+plot_grid(new4b,new4a,
+  nrow = 1,
+  labels = "AUTO",
+  label_size = 28,
+  label_x = 0.1,
+  label_y = 0.96,
+  align = "hv",
+  axis = "tblr"
+)
+
+#ggsave("Fig. 3.jpg", width = 14, height = 5)
+#ggsave("Fig. 3.pdf", width = 14, height = 5)
+
+plot_grid(boxplot,new2b,new4b,new4a,
+  nrow = 2,
+  labels = "AUTO",
+  label_size = 28,
+  label_x = 0.1,
+  label_y = 0.96,
+  align = "hv",
+  axis = "tblr"
+)
+
+#ggsave("FINAL FIG 2.pdf", width = 14, height = 10)
+#ggsave("FINAL FIG 2.jpg", width = 14, height = 10)
+
+```
+
+##What is driving the variance in body size on islands?
+
+```{r, include=FALSE}
+islandslog <- bel2[which(bel2$Island == "Island"),]
+
+islandslog$Sea.Depth[is.na(islandslog$Sea.Depth)] <- 0 #ko lanta sea depth is 0 not NA
+islandslog$Island.Area <- scale(log(as.numeric(as.character(islandslog$Island.Area))))
+islandslog$Mainland.Distance <- scale(log(as.numeric(as.character(islandslog$Mainland.Distance))))
+islandslog$Sea.Depth <- scale(log(as.numeric(as.character(islandslog$Sea.Depth))+1))
+islandslog$Lat <- scale(log(islandslog$Lat))
+
+#cor.test(islandslog$Lat,islandslog$Island.Area, method="pearson") #correlated
+#cor.test(islandslog$Lat,islandslog$Sea.Depth, method="pearson") #correlated
+#cor.test(islandslog$Lat,islandslog$Distance, method="pearson") # not correlated
+
+#cor.test(islandslog$Island.Area,islandslog$Sea.Depth, method="pearson") #correlated
+#cor.test(islandslog$Island.Area,islandslog$Distance, method="pearson") #correlated
+
+#cor.test(islandslog$Sea.Depth,islandslog$Distance, method="pearson") #correlated
+```
+
+```{r, message=FALSE}
+names(islandslog)[names(islandslog) == 'Mainland.Distance'] <- 'Distance'
+islandslog <- islandslog[!is.na(islandslog$Sex),]
+var3 <- (islandslog[c(6,7,12:14)]) #predictor var are logged and scaled
+response3 <- (as.vector(islandslog$pc1))
+h3<-hier.part(response3, var3, family="gaussian", gof="Rsqu", barplot=TRUE)
+h3$I.perc #I%: Sex: 5.2, Lat: 14.8, Area: 9.8, Distance: 57.0, Depth: 13.2 -- distance explains over half of the variance!
+#h3
+h3$IJ[,2]*100/sum(h3$IJ[,3])  ## J %
+h3$IJ[,3]*100/sum(h3$IJ[,3])  ## Total %
+#rand3<-rand.hp(islandslog$pc1, var3, family="gaussian", gof="Rsqu", num.reps=10000) #this takes a while
+rand3$Iprobs #check z scores
+
+Variable <- c("Sex", "Latitude", "Island Area", "Mainland Distance", "Sea Depth")
+Sign <- c("Not significant", "Positive", "Not significant", "Negative", "Positive")
+Variance <- h3$I.perc$ind.exp.var
+
+df <- data.frame(Variable, Variance, Sign)
+df$Variable <- factor(df$Variable, levels = c("Mainland Distance","Latitude","Sea Depth","Island Area","Sex"))
+df$Sign <- factor(df$Sign, levels = c("Positive","Negative","Not Significant"))
+df$Sign[is.na(df$Sign)] <- "Not Significant"
+df$Variance <- round(df$Variance,digit=1)
+
+hpa1 <- ggplot(data=df, aes(x=Variable, y=Variance, fill=Sign)) + 
+  geom_bar(stat="identity") +
+  ylab("Variance Explained (%)") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_text(size=12),
+        axis.text = element_text(color="black"),
+        legend.position = c(0.69,0.96),
+        legend.justification = c(0.0, 1.0),
+        panel.background = element_rect(colour = "black", size=0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  scale_fill_manual(values=c("cadetblue3","burlywood","gray79")) +
+  guides(fill=guide_legend(title="Sign of Effect")) +
+  geom_text(aes(label=Variance), vjust=1.6, color="black", size=5)
+
+#ggsave("FINAL FIG 3.jpg", width = 5, height = 4)
+#ggsave("FINAL FIG 3.pdf", width = 5, height = 4)
+```
+
+```{r}
+#now we run a linear model to check the sign (not magnitude) of these effects
+
+summary(lm(pc1~Lat+Island.Area+Distance+Sea.Depth+Sex, data=islandslog))
+#lat positive, distance is neg, sea depth is positive
+
+### Sign of the Latitude + Area + Distance + Depth effects for island populations
+#summary(lm(pc1~Lat, data=islandslog))     #positive
+#summary(lm(pc1~Mainland.Distance, data=islandslog))  #negative
+#summary(lm(pc1~Sea.Depth, data=islandslog)) #positive
+```
+
+##Environmental variables underlying body size variation across space/time
+
+```{r}
+#temp
+#CLEAN UP THESE COR.TESTS!!!
+
+cor.test(beltemp_log$Lat, beltemp_log$temp) #strong negative correlation
+cor.test(beltemp_log$Collection.Year, beltemp_log$temp) #significant but weak positive correlation
+cor.test(beltemp_log$pc1, beltemp_log$temp) #significant positive correlation between temp and body size
+
+summary(lm(pc1 ~ Collection.Year*Sex*temp, data=beltemp_log, na.action = na.omit)) #no significant interaction between temp and year, both are significant and seem to be capturing different things
+
+#rainfall
+
+cor.test(beltemp_log$Lat, beltemp_log$pre) #significant negative correlation as expected
+plot(beltemp_log$pre ~ beltemp_log$Lat)
+
+cor.test(beltemp_log$Collection.Year, beltemp_log$pre) #no significant correlation b/w year and rainfall
+
+cor.test(beltemp_log$pc1, beltemp_log$pre) #significant positive correlation b/w rainfall and body size
+plot(beltemp_log$pc1 ~ beltemp_log$pre)
+
+cor.test(beltemp_log$pre, beltemp_log$temp) #significant positive correlation b/w rainfall and temp
+plot(beltemp_log$pre ~ beltemp_log$temp)
+
+#forest cover
+
+cor.test(beltemp_log2$Lat, beltemp_log2$forests) #no sig correlation as expected
+
+cor.test(beltemp_log2$Collection.Year, beltemp_log2$forests) #significant neg correlation b/w year and forests
+plot(beltemp_log2$forests ~ beltemp_log2$Collection.Year)
+
+cor.test(beltemp_log2$pc1, beltemp_log2$forests) #significant negative correlation b/w forest cover and body size
+plot(beltemp_log2$pc1 ~ beltemp_log2$forests)
+
+cor.test(beltemp_log2$pre, beltemp_log2$forests) #no correlation b/w rainfall and forests
+
+cor.test(beltemp2$urb, beltemp2$prim) #cor
+cor.test(beltemp2$urb, beltemp2$forests) #cor
+cor.test(beltemp2$urb, beltemp2$elev) #cor
+cor.test(beltemp2$urb, beltemp2$pre) #cor
+cor.test(beltemp2$urb, beltemp2$temp) #cor
+
+cor.test(beltemp2$prim, beltemp2$forests) #cor
+cor.test(beltemp2$prim, beltemp2$elev) #cor
+cor.test(beltemp2$prim, beltemp2$pre) #cor
+cor.test(beltemp2$prim, beltemp2$temp) #no cor
+
+cor.test(beltemp2$forests, beltemp2$elev) #cor
+cor.test(beltemp2$forests, beltemp2$pre) #cor
+cor.test(beltemp2$forests, beltemp2$temp) #cor
+
+cor.test(beltemp2$elev, beltemp2$pre) #cor
+cor.test(beltemp2$elev, beltemp2$temp) #cor
+
+cor.test(beltemp2$pre, beltemp2$temp) #cor
+
+cor.test(beltemp2$temp, beltemp2$pc1)
+cor.test(beltemp2$elev, beltemp2$pc1)
+cor.test(beltemp2$urb, beltemp2$pc1)
+cor.test(beltemp2$pre, beltemp2$pc1)
+cor.test(beltemp2$prim, beltemp2$pc1)
+cor.test(beltemp2$forests, beltemp2$pc1)
+
+###exploring elevation
+cor.test(beltemp$elev, beltemp$temp) #negative correlation between altitude and temp as expected
+cor.test(bel$elev, bel$pc1) #negative correlation between elevation and PC1... opposite of what we expect, once again
+
+###urbanization
+cor.test(beltemp2$urb, beltemp2$Collection.Year) #positive correlation b/w year and urbanization as expected
+cor.test(beltemp2$pc1, beltemp2$urb) #positive correlation between body size and urbanization
+cor.test(beltemp2$Lat, beltemp2$urb) #negative correlation between latitude and urbanization, so it's unclear whether urbanization really explains body size or whether it increases (like temperature) toward the equator and therefore increases body size
+```
+
+```{r}
+#modeling environmental variables
+full <- (lm(pc1 ~ Sex+urb+temp+pre+prim+forests+elev+pre*temp, data=beltemp_log2, na.action = na.omit))
+selected <- stepAIC(full, direction = "backward", trace = FALSE)
+summary(selected)
+vif(selected)
+plot(selected)
+#vif((lm(pc1 ~ Sex+urb+temp+pre+prim+elev, data=beltemp_log2, na.action = na.omit)))
+```
+
+```{r}
+beltempmod <- beltemp2
+beltempmod$pre <- beltempmod$pre/10
+
+unscaled_pre <- (lm(pc1 ~ Sex+temp+urb+pre+prim+temp*pre, data=beltempmod, na.action = na.omit))
+
+#precip plot
+pretemp <- interact_plot(unscaled_pre, pred=temp, modx=pre, modxvals = c(80,170,660), interval = TRUE,
+              plot.points = TRUE, 
+              line.thickness=1.5, legend.main="Annual Rainfall (cm)") + 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.spacing.y = unit(2, "mm"),
+        legend.title = element_text(size=14),
+        legend.position = c(0.18, 0.82),
+        legend.key.size = unit(10, 'mm'),
+        legend.text = element_text(size=12),
+        axis.title = element_text(size=14),
+        axis.text = element_text(size=10, color="black"),
+        legend.key.height=unit(1.2,"line"),
+        panel.background = element_rect(colour = "black", size=0.5)) +
+  ylab("PC1") + xlab("Temp (°C)") + 
+  scale_x_continuous(breaks=c(5,10,15,20,25,30)) + 
+  coord_cartesian(ylim = c(-10, 13), xlim = c(5.5,28)) 
+```
+
+
+```{r}
+#THIS ONE
+k5 <- na.omit(subset(beltemp_log2, select=c(Sex, pre, temp, elev, forests, prim, urb, pc1)))
+names(k5) <- c("Sex","Rain","Temp","Elevation","TotForest","PrimaryForest","Urban","PC1")
+var5 <- k5[,1:7]
+response5 <- (as.vector(k5[,8]))
+h5<-hier.part(response5, var5, family="gaussian", gof="Rsqu", barplot=TRUE)
+h5$I.perc
+#rand2<-rand.hp(k5[,8], var5, family="gaussian", gof="Rsqu", num.reps=10000) 
+rand2$Iprobs #all significant except forests
+
+summary(lm(pc1 ~ pre, data=beltemp_log2, na.action = na.omit)) #positive
+summary(lm(pc1 ~ temp, data=beltemp_log2, na.action = na.omit)) #positive
+summary(lm(pc1 ~ elev, data=beltemp_log2, na.action = na.omit)) #negative (!)
+summary(lm(pc1 ~ forests, data=beltemp_log2, na.action = na.omit)) #negative but insig
+summary(lm(pc1 ~ prim, data=beltemp_log2, na.action = na.omit)) #positive
+
+#elevation could be capturing temperature, because the temp variable is not as fine grained (55 km^2) as the elevation variable (90 x 90 m)
+
+Variable2 <- c("Sex (Male)", "Precipitation", "Temperature", "Elevation", "Total Forest", "Primary Forest", "Urban Proximity")
+Sign2 <- c("Positive", "Positive", "Positive", "Negative", "Not Significant", "Positive", "Positive")
+Variance2 <- h5$I.perc$ind.exp.var
+
+df2 <- data.frame(Variable2, Variance2, Sign2)
+names(df2) <- c("Variable","Variance","Sign")
+df2$Variable <- factor(df2$Variable, levels = c("Sex (Male)","Temperature", "Urban Proximity","Elevation","Precipitation","Primary Forest","Total Forest"))
+df2$Sign <- factor(df2$Sign, levels = c("Positive","Negative","Not Significant"))
+#df2$Sign[is.na(df$Sign)] <- "Not Significant"
+df2
+df2$Variance <- round(df2$Variance,digit=1)
+
+hpa2 <- ggplot(data=df2, aes(x=Variable, y=Variance, fill=Sign)) + 
+  geom_bar(stat="identity") +
+  ylab("Variance Explained (%)") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_text(size=12),
+        axis.text = element_text(color="black"),
+        legend.position = c(0.7,0.96),
+        legend.justification = c(0.0, 1.0),
+        panel.background = element_rect(colour = "black", size=0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  scale_fill_manual(values=c("cadetblue3","burlywood","gray79")) +
+  guides(fill=guide_legend(title="Sign of Effect")) +
+  geom_text(aes(label = (Variance)),
+              vjust = ifelse(df2$Variance > 3, 1.6, -0.6), 
+              size = 5)
+
+#ggsave("Fig. 6.pdf", width = 7, height = 4)
+#ggsave("Fig. 6.jpg", width = 7, height = 4)
+
+cor.test(bel$elev, bel$pc1) #negative correlation b/w elevation and PC1
+#summary(lm(pc1 ~ elev, data=bel)) #sign is negative
+
+plot_grid(pretemp,hpa2,
+  nrow = 2,
+  labels = "AUTO",
+  label_size = 25,
+  label_x = 0.9,
+  label_y = 0.97,
+  align = "hv",
+  axis = "tblr"
+)
+
+ggsave("FINAL FIG 4.jpg", width = 7, height = 10)
+ggsave("FINAL FIG 4.pdf", width = 7, height = 10)
+```
+
+###FIGURES!
+
+```{r}
+#map: fig 1
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(ggspatial)
+theme_set(theme_bw())
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+mapsites <- na.omit(subset(bel, select = c(Museum, MuseumCat., Genus, species, Subspecies, Lat, Long, pc1)))
+mapsites_temp <- na.omit(subset(beltemp, select = c(Museum, MuseumCat., Genus, species, Subspecies, Lat, Long, pc1, temp)))
+
+z <- c("gray80", "gray50")
+
+#overall
+ggplot(data = world) + geom_sf() +
+  theme(axis.title.x=element_blank(), 
+        axis.title.y=element_blank(), 
+        panel.grid.major = element_line(colour = "transparent"), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1),
+        legend.position = c(0.93,0.12), 
+        axis.text = element_text(color = "black"), 
+        legend.title = element_blank(),
+        legend.spacing.x = unit(1, 'mm'), 
+        legend.key.size = unit(6, 'mm'), 
+        legend.text = element_text(color="black"), 
+        legend.background = element_rect(color = "white", 
+                                         fill = "white", 
+                                         linetype = "solid", 
+                                         size=1)) +
+    geom_point(data = mapsites_temp, 
+               aes(x = Long, 
+                   y = Lat, 
+                   size = pc1, 
+                   fill = temp), 
+               color = "black", shape = 21) + 
+  coord_sf(xlim = c(86,113), ylim = c(5,30), expand = FALSE) + 
+  xlab("Longitude") + ylab("Latitude") +
+  annotation_scale(location = "bl", width_hint = 0.18) +
+    annotation_north_arrow(location = "bl", which_north = "true", 
+        pad_x = unit(0.47, "in"), pad_y = unit(0.3, "in"), 
+        height = unit(1, "cm"),
+        width = unit(1, "cm"),
+        style = north_arrow_fancy_orienteering) + scale_size(range = c(0, 2.5)) +
+  scale_fill_viridis_c(option = "turbo", na.value = "white", breaks=c(5,10,15,20,25,30), limits=c(5,30), labels=c("  5 °C","10 °C","15 °C","20 °C","25 °C","30 °C")) + guides(size="none") +
+  scale_size_continuous(range = c(0, 5))
+
+#ggsave("FINAL FIG 1.pdf", width = 7, height = 7)
+#ggsave("FINAL FIG 1.jpg", width = 7, height = 7)
+```
+
+###TAXONOMY: EXTENDED DATA FIG 1
+
+```{r}
+#beltax <- beltax[which(beltax$Subspecies == ""),]
+
+length(unique(beltax$Subspecies))
+
+optPCAbel <- function(data, name) {
+  early <- data
+  data2 <- data[,-c(1:5, 28:44)]
+  data2 <- data2[rowSums(is.na(data2)) < 100,]
+  collist = combn(ncol(data2), 8)
+  numobs = apply(collist, 2, function(x) nrow(na.omit(data2[, x])))
+  cat("for subset size", 8, "most complete obs is", max(numobs), "\n")
+  best.list = list()
+  best = which(numobs == max(numobs))[1]
+  best.list = c(best.list, list(collist[, best]))
+  data <- na.omit(data[,(best.list[[1]]+5)])
+  name <- deparse(substitute(name))  
+  assign(name,data,envir = .GlobalEnv)
+}
+
+#optPCAbel(beltax, beltax2)
+
+bel_opt <- na.omit(subset(beltax, select = c(Museum, MuseumCat., Genus, species, Subspecies, UTL, MTL, LIB, PBPL, LTPL, MH, MCH, MCW)))
+
+bel_opt$Subspecies <- as.character(bel_opt$Subspecies)
+bel_opt[which(bel_opt$Subspecies == "T. b. cognata"),]$Subspecies <- "T. g. cognata"
+bel_opt$Subspecies <- as.factor(bel_opt$Subspecies)
+summary(bel_opt$Subspecies)
+
+bel_opt$chinensis <- "T. b. belangeri"
+bel_opt$chinensis[bel_opt$Subspecies == "T. b. chinensis"] <- "T. b. chinensis"
+bel_opt$chinensis <- as.factor(bel_opt$chinensis)
+summary(bel_opt$chinensis)
+
+bel_opt[,6:13] <- log(bel_opt[,6:13])
+```
+
+```{r}
+pc1 <- princomp(bel_opt[,6:13], cor=TRUE)
+for (i in 1:8) {
+  pc1$loadings[,i] <- (pc1$loadings[,i] * pc1$sdev[i])
+}
+print(summary(pc1),digits=4,loadings=pc1$loadings,cutoff=0)
+pc1$sdev^2
+
+bel_opt$pc1 <- pc1$scores[,1]
+bel_opt$pc2 <- pc1$scores[,2]
+
+bel_opt2 <- bel_opt
+bel_opt2$Subspecies <- bel_opt2$chinensis
+
+loadings2 <- as.data.frame(pc1$loadings[,1:5])
+names(loadings2) <- c("PC1","PC2","PC3","PC4","PC5")
+loadings2 <- as.matrix(loadings2)
+
+png(height=8000, width=6000, file="Correlation matrix.png")
+
+corrplot(loadings2, is.corr=FALSE, tl.cex = 15, tl.srt = 45, method="circle",tl.col = 'black',
+         cl.lim = c(-1,1), col = colorRampPalette(c("red", "orange", "white", "deepskyblue", "blue4"))(100), cl.ratio = 0.3, cl.pos = "r", cl.cex = 12, addgrid.col = 'black')
+
+dev.off()
+
+find_hull <- function(bel_opt) bel_opt[chull(bel_opt$pc1, bel_opt$pc2), ]
+hulls <- ddply(bel_opt, "Subspecies", find_hull)
+
+a <- ggplot(data = bel_opt, aes(x=pc1, y=pc2, group=Subspecies)) + 
+  geom_polygon(data=hulls, alpha=0.2, size=0.2, linetype=1, color="black",
+               aes(x=pc1, 
+                   y=pc2, 
+                   group=Subspecies, 
+                   fill=Subspecies)) + 
+  geom_point(aes(fill=Subspecies), size=3, shape=21) +
+  theme_bw() + theme(panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank()) +
+  xlab("PC1 (72.4%)") + ylab("PC2 (13.4%)") +
+  theme(text = element_text(size=12)) + 
+  theme(axis.text.x = element_text(color="black"), 
+        axis.text.y = element_text(color="black")) +
+  guides(fill = 
+           guide_legend(label.theme = element_text(angle = 0, 
+                                                   face = "italic", 
+                                                   size=8))) + 
+  theme(legend.spacing.y = unit(2, "mm"), legend.title = element_blank())
+```
+
+```{r}
+find_hull2 <- function(bel_opt2) bel_opt2[chull(bel_opt2$pc1, bel_opt2$pc2), ]
+hulls2 <- ddply(bel_opt2, "Subspecies", find_hull2)
+
+b <- ggplot(bel_opt2 %>% arrange(Subspecies), aes(x=pc1, y=pc2, group=Subspecies)) + 
+  geom_polygon(data=hulls2, alpha=0.2, size=0.5, linetype=1, color="black",
+               aes(x=pc1, 
+                   y=pc2, 
+                   group=Subspecies, 
+                   fill=Subspecies)) + 
+  geom_point(aes(fill=Subspecies), size=3, shape=21) +
+  theme_bw() + theme(panel.grid.major = element_blank(), 
+                     panel.grid.minor = element_blank()) +
+  xlab("PC1 (72.4%)") + ylab("PC2 (13.4%)") +
+  theme(text = element_text(size=12)) + 
+  theme(axis.text.x = element_text(color="black"), 
+        axis.text.y = element_text(color="black")) +
+  guides(fill = 
+           guide_legend(label.theme = element_text(angle = 0, 
+                                                   face = "italic", 
+                                                   size=8))) + 
+  theme(legend.spacing.y = unit(2, "mm"),
+        legend.title = element_blank(),
+        legend.position = c(0.88, 0.089),
+        legend.key.size = unit(4, 'mm'))
+```
+
+```{r}
+panel <- plot_grid(a, b,
+  nrow = 2,
+  align = "hv",
+  axis = "tblr"
+)
+
+library(magick)
+ggdraw(panel) + 
+  draw_image("Correlation matrix.png", x = 1.02, y = 0.45, hjust = 1, vjust = 1, width = 0.4, height = 0.4) + draw_label("B", x = 0.1, y = 0.455, fontface = "bold", size = 18) + draw_label("A", x = 0.1, y = 0.955, fontface = "bold", size = 18) + draw_label("C", x = 0.7, y = 0.455, fontface = "bold", size = 18)
+
+ggsave("FINAL EXTENDED FIG 1.jpg", width = 8, height = 8)
+ggsave("FINAL EXTENDED FIG 1.pdf", width = 8, height = 8)
+```
+
+###EXTENDED DATA FIG 2
+
+```{r}
+setwd("~/Desktop/belangeri/CRU climate")
+
+TmpDBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best_1874.nc", varname = "TmpDBF")
+
+TmpEBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best_1874.nc", varname = "TmpEBF")
+
+TmpENF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best_1874.nc", varname = "TmpENF")
+
+TrpDBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best_1874.nc", varname = "TrpDBF")
+
+TrpEBF <- brick("~/Desktop/belangeri/CRU climate/landcover-HYDEAREAVEG-fc_Historical_Land-Cover_Change_and_Land-Use_Conversions_Global_Dataset__HYDE_AREAVEG_Feature_Collection_best_1874.nc", varname = "TrpEBF")
+
+#forest cover plots
+plotforestsprim <- TmpDBF + TmpEBF + TmpENF + TrpDBF + TrpEBF
+years2 <- 1874:2003
+plotforestsprim@data@names <- years2
+```
+
+```{r}
+#plots
+setwd("~/Desktop/belangeri/CRU climate")
+#nc.tmp <- nc_open("cru_ts4.05.1901.2020.tmp.dat.nc")
+#print(nc.tmp)
+
+tmp <- brick("~/Desktop/belangeri/CRU climate/cru_ts4.05.1901.2020.tmp.dat.nc", varname="tmp")
+#tmp
+asia_lim <- extent(86, 111, 6, 30)
+asiatmp <- crop(tmp, asia_lim)
+asiatmp1901 <- mean(asiatmp[[1:12]])
+asiatmp2003 <- mean(asiatmp[[1225:1236]])
+asiatmp2020 <- mean(asiatmp[[1429:1440]])
+asiatmp19011905 <- mean(asiatmp[[1:60]]) #avg of first 5 years of (available) dataset
+asiatmp19992003 <- mean(asiatmp[[1177:1236]]) #avg of last 5 years of dataset
+
+#average rainfall, forests, and temperature rasters to create an avg yearly plot: *avg* temp (avg layers), *total* forest cover (add rasters), and *sum* of yearly rains (add layers)
+
+urb <- brick("~/Desktop/belangeri/CRU climate/urban.nc", varname = "Urban")
+urb2 <- data.frame(extract(urb, sites, ncol=2))
+urb2 <- urb2[,-(1:28)]
+asia_urb <- crop(urb, asia_lim)
+```
+
+```{r}
+#prec plots
+#nc.pre <- nc_open("cru_ts4.05.1901.2020.pre.dat.nc")
+#print(nc.pre)
+setwd("~/Desktop/belangeri/CRU climate")
+pre <- brick("~/Desktop/belangeri/CRU climate/cru_ts4.05.1901.2020.pre.dat.nc", varname="pre")
+asiapre <- crop(pre, asia_lim)
+asiapre1901 <- sum(asiapre[[1:12]])/10
+#THIS SHOULD BE /50, NOT /100
+asiapre19011905 <- sum(asiapre[[1:60]])/50 #avg of first 5 years of (available) dataset
+#asiapre2003 <- sum(asiapre[[1225:1236]])/10
+#asiapre200312 <- sum(asiapre[[1225:1344]])/100
+#THIS SHOULD BE /50, NOT /100
+asiapre19992003 <- sum(asiapre[[1177:1236]])/50 #avg of last 5 years of dataset
+asiapre2020 <- sum(asiapre[[1429:1440]])/10
+```
+
+```{r}
+#all plots
+
+brk <- c(-5,0,5,10,15,20,25,30)
+par(mfrow=c(1,2))
+
+temp1 <- spplot(asiatmp19011905, col.regions = (turbo(40, begin = 0.25, end = 1)), scales=list(tck=c(0.3,0), draw=T,x=list(at=seq(90,110,10))), colorkey=list(at=seq(5,25,1)),  at=seq(-7,30,1)) +
+  layer(panel.points(bel$Long, bel$Lat, col="black", pch='.'), data=asiatmp19011905)
+
+temp2 <- spplot(asiatmp19992003, col.regions = (turbo(40, begin = 0.25, end = 1)), scales=list(tck=c(0.3,0), draw=T, x=list(at=seq(90,110,10))), colorkey=list(at=seq(5,25,1)),  at=seq(-7,30,1)) +
+  layer(panel.points(bel$Long, bel$Lat, col="black", pch='.'), data=asiatmp19992003)
+
+pre1 <- spplot(asiapre19011905, col.regions=rev(viridis(50)), scales=list(tck=c(0.3,0), draw=TRUE, x=list(at=seq(90,110,10))), colorkey=list(at=seq(50,550,25),tick.number=4), at = seq(50,550,10)) + layer(panel.points(bel$Long, bel$Lat, col="black", pch='.'), data=asiapre19011905)
+
+pre2 <- spplot(asiapre19992003, col.regions=rev(viridis(50)), scales=list(tck=c(0.3,0), draw=TRUE, x=list(at=seq(90,110,10))), colorkey=list(at=seq(50,550,25), tick.number=4), at = seq(50,550,10)) + layer(panel.points(bel$Long, bel$Lat, col="black", pch='.'), data=asiapre19992003)
+
+prim1 <- spplot(plotforestsprim$X1874, col.regions = rev(terrain.colors(30)), scales=list(tck=c(0.3,0),x=list(at=seq(90,110,10)), draw=T), colorkey=list(at=seq(0, 100, 10),tick.number=3)) +
+  layer(panel.points(bel$Long, bel$Lat, col="black", pch='.'), data=plotforestsprim$X1874)
+
+prim2 <- spplot(plotforestsprim$X2003, col.regions = rev(terrain.colors(30)), scales=list(tck=c(0.3,0), draw=T, x=list(at=seq(90,110,10))), colorkey=list(at=seq(0, 100, 10), tick.number=3)) +
+  layer(panel.points(bel$Long, bel$Lat, col="black", pch='.'), data=plotforestsprim$X2003)
+
+urb1 <- spplot(asia_urb$X1874.01.01.00.00.00, col.regions=rev(rocket(30)), 
+               scales=list(tck=c(0.3,0), draw=T, x=list(at=seq(90,110,10))),
+               colorkey=list(at=seq(0, 25, 1), tick.number=5), at = seq(0,22,0.5)) +
+  layer(panel.points(bel$Long, bel$Lat, col="black", pch='.'), data=asia_urb$X1874.01.01.00.00.00)
+
+urb2 <- spplot(asia_urb$X2003.12.31.23.56.02, col.regions=rev(rocket(30)), 
+               scales=list(tck=c(0.3,0), draw=T, x=list(at=seq(90,110,10))),
+               colorkey=list(at=seq(0, 25, 1), tick.number=5), at = seq(0,22,0.5)) +
+  layer(panel.points(bel$Long, bel$Lat, col="black", pch='.'), data=asia_urb$X2003.12.31.23.56.02)
+
+plot_grid(temp1, temp2, pre1, pre2, prim1, prim2, urb1, urb2,
+  nrow = 4, align = "tblr", labels = "AUTO",
+  label_size = 18,
+  label_x = 0.22, label_y = 0.32)
+
+#ggsave("Extended Data Fig. 2.pdf", width = 7.5, height = 12)
+```
