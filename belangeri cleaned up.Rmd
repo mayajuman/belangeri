@@ -52,6 +52,7 @@ bel$Mainland.Distance <- as.factor(bel$Mainland.Distance)
 bel$Sea.Depth <- as.factor(bel$Sea.Depth)
 bel[bel == 0.00] <- NA
 
+#if reading in data from formatted supplementary data file, INST = "Museum", Number = "MuseumCat.", Source = "Island" (General Locality, Collection Date, TV, HF, E, and Type.information are original variables in raw data file that were not used in analyses)
 bel <- subset(bel, select = c(Museum, MuseumCat., Genus, species, Subspecies, CPL, CIL, UTL, MTL, EPL, PPL, EB, MB, LB, LIB, ZB, BB, LPL, CNL, PBPL, LTPL, LCH, MH, MCH, MCW, MCIL, LTL, Sex, Lat, Long, Locality, General.Locality, Island, Island.Area, Mainland.Distance, Sea.Depth, Collection.Year, Collection.Date, TL, TV, HF, E, WT, Type.information, elev))
 
 #table(beltax$Island) #111 island, 726 mainland individuals
@@ -107,7 +108,7 @@ for (i in 1:836) {
 ```
 
 ```{r, include=FALSE}
-imp <- read.csv("imputed belangeri with 2 LACM.csv")
+imp <- read.csv("imputed belangeri.csv")
 imp <- imp[,-1]
 
 pca <- princomp(log(imp), cor=TRUE)
