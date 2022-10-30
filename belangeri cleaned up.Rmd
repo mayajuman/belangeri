@@ -1,7 +1,7 @@
 ---
 title: "Ecogeographical rules in *T. belangeri*"
 author: "Maya Juman"
-date: "August 1, 2022"
+date: "October 29, 2022"
 output: html_document
 ---
 
@@ -23,6 +23,7 @@ library(Morpho)
 library(ellipse)
 library(ggfortify)
 library(plyr)
+library(dplyr)
 library(interactions)
 library(performance)
 library(see)
@@ -105,11 +106,20 @@ for (i in 1:836) {
 }
 
 #summary(bel$elev) #check
+
+table(bel$Sex)
+table(islands$Sex)
 ```
 
 ```{r, include=FALSE}
-imp <- read.csv("imputed belangeri.csv")
+imp <- read.csv("imputed belangeri with 2 LACM.csv")
 imp <- imp[,-1]
+
+impmale <- imp[which(bel$Sex == "m"),]
+impfemale <- imp[which(bel$Sex == "f"),]
+
+belmale <- bel[which(bel$Sex == "m"),]
+belfemale <- bel[which(bel$Sex == "f"),]
 
 pca <- princomp(log(imp), cor=TRUE)
 for (i in 1:18) {
@@ -121,6 +131,11 @@ pca$sdev^2 #eigenvalues (i.e. squared standard dv)
 
 bel$pc1 <- pca[["scores"]][,1]
 bel$pc2 <- pca[["scores"]][,2]
+
+pcamale <- princomp(log(impmale), cor=TRUE)
+pcafemale <- princomp(log(impfemale), cor=TRUE)
+belmale$pc1 <- pcamale[["scores"]][,1]
+belfemale$pc1 <- pcafemale[["scores"]][,1]
 
 #confirm correlations on PC1
 cor.test(bel$pc1, bel$TL) #PC1 positively correlated w/ body length
@@ -219,12 +234,33 @@ bel2_log$Collection.Year <- as.numeric(scale(log(bel2_log$Collection.Year)))
 bel2_log$Lat <- as.numeric(scale(log(bel2_log$Lat)))
 bel2_log$elev <- as.numeric(scale(log(bel2_log$elev)))
 
+#new
+belmale$Collection.Year <- as.numeric(scale(log(belmale$Collection.Year)))
+belmale$Lat <- as.numeric(scale(log(belmale$Lat)))
+
+belfemale$Collection.Year <- as.numeric(scale(log(belfemale$Collection.Year)))
+belfemale$Lat <- as.numeric(scale(log(belfemale$Lat)))
+
 beltemp_log <- beltemp
 beltemp_log$Collection.Year <- scale(log(beltemp_log$Collection.Year))
 beltemp_log$temp <- scale(log(beltemp_log$temp))
 beltemp_log$Lat <- scale(log(beltemp_log$Lat))
 beltemp_log$pre <- scale(log(beltemp_log$pre))
 beltemp_log$elev <- scale(log(beltemp_log$elev))
+
+##checking each sex separately
+
+#male <- bel2_log[which(bel2_log$Sex == "m"),]
+#female <- bel2_log[which(bel2_log$Sex == "f"),]
+
+#belmale$Island <- relevel(belmale$Island, ref = "mainland") 
+#belfemale$Island <- relevel(belfemale$Island, ref = "mainland") 
+
+#summary(lm(pc1 ~ Collection.Year*Island*Lat, data=male, na.action = na.omit))
+#summary(lm(pc1 ~ Collection.Year*Island*Lat, data=female, na.action = na.omit))
+
+#summary(lm(pc1 ~ Collection.Year*Island*Lat, data=belmale, na.action = na.omit))
+#summary(lm(pc1 ~ Collection.Year*Island*Lat, data=belfemale, na.action = na.omit))
 ```
 
 ```{r}
@@ -552,7 +588,7 @@ h3$I.perc #I%: Sex: 5.2, Lat: 14.8, Area: 9.8, Distance: 57.0, Depth: 13.2 -- di
 h3$IJ[,2]*100/sum(h3$IJ[,3])  ## J %
 h3$IJ[,3]*100/sum(h3$IJ[,3])  ## Total %
 #rand3<-rand.hp(islandslog$pc1, var3, family="gaussian", gof="Rsqu", num.reps=10000) #this takes a while
-rand3$Iprobs #check z scores
+#rand3$Iprobs #check z scores
 
 Variable <- c("Sex", "Latitude", "Island Area", "Mainland Distance", "Sea Depth")
 Sign <- c("Not significant", "Positive", "Not significant", "Negative", "Positive")
@@ -647,10 +683,50 @@ plot(selected)
 ```
 
 ```{r}
+#spatial autocorrelation
+
+filtered2 <- na.omit(subset(beltemp_log2, select = c(pc1, Lat, Long, Sex, elev, temp, urb, pre, prim, forests)))
+filtcoords <- na.omit(subset(beltemp2, select = c(pc1, Lat, Long, Sex, elev, temp, urb, pre, prim, forests)))
+
+coords2 = data.frame(x=filtcoords$Long, y=filtcoords$Lat)
+plot(coords2)
+sp2 = SpatialPoints(coords2)
+data2=data.frame(resid=residuals(selected)) #rstandard for standardized residuals
+spdf2 = SpatialPointsDataFrame(sp2,data2)
+bubble(spdf2, "resid", maxsize = 1) #definitely clustering
+
+library(spdep)
+
+id2 <- row.names(filtered2)
+coords2 <- data.frame(x=filtcoords$Long, y=filtcoords$Lat)
+coords2 <- data.matrix(coords2)
+nb2 <- knn2nb(knearneigh(coords2, k = 5), row.names = id2)
+nb_w2 <- nb2listw(nb2, style = "B", zero.policy = T)
+
+entirething3 <- (lm(pc1 ~ Sex+temp+urb+pre+prim+temp*pre, data=filtered2, na.action = na.omit))
+
+reduced3 <- stepAIC(entirething3, direction = "backward", trace = FALSE)
+
+lm.morantest(reduced3,nb_w2) #significant spatial autocorrelation
+
+library(spatialreg)
+
+#spatial error model
+sem2 <- errorsarlm(formula = pc1 ~ Sex+temp+urb+pre+elev+forests+prim+temp*pre, data = filtered2, listw = nb_w2, quiet=T)
+summary(sem2)
+
+#spatial lag model
+lag2 <- lagsarlm(formula = pc1 ~ Sex+temp+urb+pre+prim+elev+forests+temp*pre, data = filtered2, listw = nb_w2, quiet=T)
+
+summary(lag2) #lower AIC, effects are conserved. phew
+```
+
+```{r}
 beltempmod <- beltemp2
 beltempmod$pre <- beltempmod$pre/10
 
-unscaled_pre <- (lm(pc1 ~ Sex+temp+urb+pre+prim+temp*pre, data=beltempmod, na.action = na.omit))
+unscaled_pre <- (lm(pc1 ~ Sex++temp*pre, data=beltempmod, na.action = na.omit))
+#these look the same
 
 #precip plot
 pretemp <- interact_plot(unscaled_pre, pred=temp, modx=pre, modxvals = c(80,170,660), interval = TRUE,
@@ -671,10 +747,15 @@ pretemp <- interact_plot(unscaled_pre, pred=temp, modx=pre, modxvals = c(80,170,
   ylab("PC1") + xlab("Temp (°C)") + 
   scale_x_continuous(breaks=c(5,10,15,20,25,30)) + 
   coord_cartesian(ylim = c(-10, 13), xlim = c(5.5,28)) 
+pretemp
+
+ggsave("FINAL FIG 4.jpg", width = 7, height = 5)
+ggsave("FINAL FIG 4.pdf", width = 7, height = 5)
 ```
 
 
 ```{r}
+#hierarchical partitioning analysis omitted from final MS
 k5 <- na.omit(subset(beltemp_log2, select=c(Sex, pre, temp, elev, forests, prim, urb, pc1)))
 names(k5) <- c("Sex","Rain","Temp","Elevation","TotForest","PrimaryForest","Urban","PC1")
 var5 <- k5[,1:7]
@@ -700,44 +781,7 @@ df2$Variable <- factor(df2$Variable, levels = c("Sex (Male)","Temperature", "Urb
 df2$Sign <- factor(df2$Sign, levels = c("Positive","Negative","Not Significant"))
 #df2$Sign[is.na(df$Sign)] <- "Not Significant"
 df2
-df2$Variance <- round(df2$Variance,digit=1)
-
-hpa2 <- ggplot(data=df2, aes(x=Variable, y=Variance, fill=Sign)) + 
-  geom_bar(stat="identity") +
-  ylab("Variance Explained (%)") +
-  theme_bw() +
-  theme(axis.title.x = element_blank(),
-        axis.title.y = element_text(size=12),
-        axis.text = element_text(color="black"),
-        legend.position = c(0.7,0.96),
-        legend.justification = c(0.0, 1.0),
-        panel.background = element_rect(colour = "black", size=0.5),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_fill_manual(values=c("cadetblue3","burlywood","gray79")) +
-  guides(fill=guide_legend(title="Sign of Effect")) +
-  geom_text(aes(label = (Variance)),
-              vjust = ifelse(df2$Variance > 3, 1.6, -0.6), 
-              size = 5)
-
-#ggsave("Fig. 6.pdf", width = 7, height = 4)
-#ggsave("Fig. 6.jpg", width = 7, height = 4)
-
-cor.test(bel$elev, bel$pc1) #negative correlation b/w elevation and PC1
-#summary(lm(pc1 ~ elev, data=bel)) #sign is negative
-
-plot_grid(pretemp,hpa2,
-  nrow = 2,
-  labels = "AUTO",
-  label_size = 25,
-  label_x = 0.9,
-  label_y = 0.97,
-  align = "hv",
-  axis = "tblr"
-)
-
-ggsave("FINAL FIG 4.jpg", width = 7, height = 10)
-ggsave("FINAL FIG 4.pdf", width = 7, height = 10)
+#df2$Variance <- round(df2$Variance,digit=1)
 ```
 
 ###FIGURES!
@@ -755,30 +799,15 @@ mapsites_temp <- na.omit(subset(beltemp, select = c(Museum, MuseumCat., Genus, s
 
 z <- c("gray80", "gray50")
 
-#overall
-ggplot(data = world) + geom_sf() +
-  theme(axis.title.x=element_blank(), 
-        axis.title.y=element_blank(), 
-        panel.grid.major = element_line(colour = "transparent"), 
-        panel.border = element_rect(colour = "black", fill=NA, size=1),
-        legend.position = c(0.93,0.12), 
-        axis.text = element_text(color = "black"), 
-        legend.title = element_blank(),
-        legend.spacing.x = unit(1, 'mm'), 
-        legend.key.size = unit(6, 'mm'), 
-        legend.text = element_text(color="black"), 
-        legend.background = element_rect(color = "white", 
-                                         fill = "white", 
-                                         linetype = "solid", 
-                                         size=1)) +
-    geom_point(data = mapsites_temp, 
-               aes(x = Long, 
-                   y = Lat, 
-                   size = pc1, 
-                   fill = temp), 
-               color = "black", shape = 21) + 
-  coord_sf(xlim = c(86,113), ylim = c(5,30), expand = FALSE) + 
-  xlab("Longitude") + ylab("Latitude") +
+belmap <- bel
+belmap$temp <- beltemp$temp[match(bel$MuseumCat., beltemp$MuseumCat.)]
+
+map <- ggplot(data = world) + geom_sf() +
+  theme(axis.title.x=element_blank(), axis.title.y=element_blank(), panel.grid.major = element_line(colour = "transparent"), panel.border = element_rect(colour = "black", fill=NA, size=1)) +
+    geom_point(data = belmap, aes(x = Long, y = Lat, size = pc1, fill = temp), color = "black", shape = 21) + 
+  coord_sf(xlim = c(86,113), ylim = c(5,30), expand = FALSE) + xlab("Longitude") + ylab("Latitude") + 
+  theme(legend.position = c(0.93,0.12), axis.text = element_text(color = "black"), legend.title = element_blank(),
+        legend.spacing.x = unit(1, 'mm'), legend.key.size = unit(6, 'mm'), legend.text = element_text(color="black"), legend.background = element_rect(color = "white", fill = "white", linetype = "solid", size=1)) +
   annotation_scale(location = "bl", width_hint = 0.18) +
     annotation_north_arrow(location = "bl", which_north = "true", 
         pad_x = unit(0.47, "in"), pad_y = unit(0.3, "in"), 
@@ -788,8 +817,12 @@ ggplot(data = world) + geom_sf() +
   scale_fill_viridis_c(option = "turbo", na.value = "white", breaks=c(5,10,15,20,25,30), limits=c(5,30), labels=c("  5 °C","10 °C","15 °C","20 °C","25 °C","30 °C")) + guides(size="none") +
   scale_size_continuous(range = c(0, 5))
 
-#ggsave("FINAL FIG 1.pdf", width = 7, height = 7)
-#ggsave("FINAL FIG 1.jpg", width = 7, height = 7)
+library(magick)
+ggdraw(map) + 
+  draw_image("belangeri.png", x = 0.98, y = 1.07, hjust = 1, vjust = 1, width = 0.34, height = 0.34)
+
+ggsave("FINAL FIG 1.pdf", width = 7, height = 7)
+ggsave("FINAL FIG 1.jpg", width = 7, height = 7)
 ```
 
 ###TAXONOMY: Supplementary Fig 1
